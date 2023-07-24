@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [int]$LastHours = 6,
+    [int]$LastHours = 1,
     [Switch]$ShowUsernames = $false
 )
 
