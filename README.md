@@ -12,7 +12,7 @@ Download all scripts in any folder and run (with administrative privileges):
 Install-ScheduledTask.ps1
 ```
 
-This will create a scheduled task to run `Update-FirewallRule.ps1` (see below) every hour.
+This will create a scheduled task to run `Update-FirewallRule.ps1` (see below) every 5 minutes.
 
 ## Enabling Event ID 4625 in Windows Security Logs
 

@@ -9,8 +9,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $blacklistFile = Join-Path $PSScriptRoot 'blacklist.txt'
+$blockedFile = Join-Path $PSScriptRoot 'blocked.txt'
 $whitelistFile = Join-Path $PSScriptRoot 'whitelist.txt'
-$changeLogFile = Join-Path $PSScriptRoot 'blacklist-changes.log'
+$changeLogFile = Join-Path $PSScriptRoot 'blocked-changes.log'
 
 function Get-FailedIps {
     # Get IP addresses with more than 10 failed Windows logon attempts
@@ -64,8 +65,14 @@ function Get-FailedIpsSql {
         Select-Object -Unique
 }
 
-function Get-BlockedIps {
+function Get-BlacklistedIps {
     Get-Content -Path $blacklistFile -Encoding Ascii -ErrorAction SilentlyContinue |
+        Where-Object { $_ } |
+        Select-Object -Unique
+}
+
+function Get-BlockedIps {
+    Get-Content -Path $blockedFile -Encoding Ascii -ErrorAction SilentlyContinue |
         Where-Object { $_ } |
         Select-Object -Unique
 }
@@ -98,9 +105,9 @@ function Write-BlacklistChanges {
 
     $logLines = foreach ($change in $changes) {
         $action = switch ($change.SideIndicator) {
-            '=>' { 'Hinzugefuegt' }
-            '<=' { 'Entfernt' }
-            default { 'Unbekannt' }
+            '=>' { 'Added' }
+            '<=' { 'Removed' }
+            default { 'Unknown' }
         }
 
         '{0};{1};{2}' -f $timestamp, $change.InputObject, $action
@@ -116,10 +123,11 @@ function Write-BlacklistChanges {
 $failedIps = @(Get-FailedIps)
 $failedIpsSql = @(Get-FailedIpsSql)
 $failedIpsOpenSSH = @(Get-FailedIpsOpenSSH)
+$blacklistedIps = @(Get-BlacklistedIps)
 $oldBlockedIps = @(Get-BlockedIps)
 
 $newBlockedIps = @(
-    [array]$failedIps + [array]$failedIpsSql + [array]$failedIpsOpenSSH
+    [array]$failedIps + [array]$failedIpsSql + [array]$failedIpsOpenSSH + [array]$blacklistedIps
 ) |
     Where-Object { $_ } |
     Select-Object -Unique |
@@ -127,7 +135,7 @@ $newBlockedIps = @(
 
 Write-BlacklistChanges -OldIps $oldBlockedIps -NewIps $newBlockedIps
 
-$newBlockedIps | Out-File -FilePath $blacklistFile -Encoding ascii
+$newBlockedIps | Out-File -FilePath $blockedFile -Encoding ascii
 
 $allowedIps = @(Get-AllowedIps)
 $firewallIps = @(
