@@ -1,1 +1,0 @@
-del %~dp0\blacklist.txt

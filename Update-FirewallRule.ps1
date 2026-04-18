@@ -1,74 +1,188 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 
 [CmdletBinding()]
 param(
-    [int]$LastHours = 1
+    [int]$LastHours = 2,
+    [switch]$DebugMode = $false
 )
 
 $ErrorActionPreference = 'Stop'
 
 $blacklistFile = Join-Path $PSScriptRoot 'blacklist.txt'
 $whitelistFile = Join-Path $PSScriptRoot 'whitelist.txt'
-
-
+$changeLogFile = Join-Path $PSScriptRoot 'blacklist-changes.log'
 
 function Get-FailedIps {
-    # Get IP addresses with more than 10 failed logon attempts
-    $ExtraParams = @{}
+    # Get IP addresses with more than 10 failed Windows logon attempts
+    $extraParams = @{}
     if ($LastHours -gt 0) {
-        $ExtraParams = @{LastHours = $LastHours}
+        $extraParams.LastHours = $LastHours
     }
 
     $getFailedLogons = Join-Path $PSScriptRoot 'Get-FailedLogons.ps1'
 
-    $failedIps = @()
-    & $getFailedLogons @ExtraParams |
+    & $getFailedLogons @extraParams |
         ForEach-Object {
-            $failedIps += $_.Name
+            $_.Name
+        } |
+        Where-Object { $_ } |
+        Select-Object -Unique
+}
+
+function Get-FailedIpsOpenSSH {
+    # Get IP addresses with more than 10 failed Windows logon attempts
+    $extraParams = @{}
+    if ($LastHours -gt 0) {
+        $extraParams.LastHours = $LastHours
     }
 
-    $failedIps
+    $getFailedLogons = Join-Path $PSScriptRoot 'Get-FailedLogons_OpenSSH.ps1'
+
+    & $getFailedLogons @extraParams |
+        ForEach-Object {
+            $_.Name
+        } |
+        Where-Object { $_ } |
+        Select-Object -Unique
 }
 
+function Get-FailedIpsSql {
+    $extraParams = @{
+        ServerInstance = ".\SQLEXPRESS"
+        MinCount       = 10
+    }
 
+    if ($LastHours -gt 0) {
+        $extraParams.LastHours = $LastHours
+    }
+
+    $getFailedLogons = Join-Path $PSScriptRoot 'Get-FailedLogons_MSSQL.ps1'
+
+    & $getFailedLogons @extraParams |
+        Select-Object -ExpandProperty IPAddress |
+        Where-Object { $_ } |
+        Select-Object -Unique
+}
 
 function Get-BlockedIps {
-    # Get blacklisted IPs (already blocked)
-    Get-Content -Path $blacklistFile -Encoding Ascii -ErrorAction SilentlyContinue
+    Get-Content -Path $blacklistFile -Encoding Ascii -ErrorAction SilentlyContinue |
+        Where-Object { $_ } |
+        Select-Object -Unique
 }
-
-
 
 function Get-AllowedIps {
-    # Get whitelisted IPs
-    Get-Content -Path $whitelistFile -Encoding Ascii -ErrorAction SilentlyContinue
+    Get-Content -Path $whitelistFile -Encoding Ascii -ErrorAction SilentlyContinue |
+        Where-Object { $_ } |
+        Select-Object -Unique
 }
 
+function Write-BlacklistChanges {
+    param(
+        [AllowNull()]
+        [string[]]$OldIps,
 
+        [AllowNull()]
+        [string[]]$NewIps
+    )
+
+    $oldList = @($OldIps | Where-Object { $_ })
+    $newList = @($NewIps | Where-Object { $_ })
+
+    $changes = Compare-Object -ReferenceObject $oldList -DifferenceObject $newList
+
+    if (-not $changes) {
+        return
+    }
+
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ssK')
+
+    $logLines = foreach ($change in $changes) {
+        $action = switch ($change.SideIndicator) {
+            '=>' { 'Hinzugefuegt' }
+            '<=' { 'Entfernt' }
+            default { 'Unbekannt' }
+        }
+
+        '{0};{1};{2}' -f $timestamp, $change.InputObject, $action
+    }
+
+    $logLines | Add-Content -Path $changeLogFile -Encoding UTF8
+}
 
 #
 # Main
 #
 
-$failedIps = Get-FailedIps
-$blockedIps = Get-BlockedIps
-$allIps = [array]$failedIps + [array]$blockedIps | Select-Object -Unique | Sort-Object
+$failedIps = @(Get-FailedIps)
+$failedIpsSql = @(Get-FailedIpsSql)
+$failedIpsOpenSSH = @(Get-FailedIpsOpenSSH)
+$oldBlockedIps = @(Get-BlockedIps)
 
-# Update blacklist
-$allIps | Out-File -FilePath $blacklistFile -Encoding ascii
+$newBlockedIps = @(
+    [array]$failedIps + [array]$failedIpsSql + [array]$failedIpsOpenSSH
+) |
+    Where-Object { $_ } |
+    Select-Object -Unique |
+    Sort-Object
 
-# Remove allowed IPs
-$allowedIps = Get-AllowedIps
-$allIps = $allIps | Where-Object { $_ -notin $allowedIps }
+Write-BlacklistChanges -OldIps $oldBlockedIps -NewIps $newBlockedIps
 
-# Update firewall
+$newBlockedIps | Out-File -FilePath $blacklistFile -Encoding ascii
+
+$allowedIps = @(Get-AllowedIps)
+$firewallIps = @(
+    $newBlockedIps | Where-Object { $_ -notin $allowedIps }
+)
+
 $ruleName = 'PSFail2Ban-Block-Failed-Logons'
 $ruleDisplayName = 'PSFail2Ban: Blocks IP addresses from failed logons'
+$existingRule = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
 
-if (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue) {
-    # Update rule
-    Set-NetFirewallRule -Name $ruleName -RemoteAddress $allIps
-} else {
-    # Create rule
-    New-NetFirewallRule -Name $ruleName -DisplayName $ruleDisplayName -Direction Inbound -Action Block -RemoteAddress $allIps
+if ($DebugMode) {
+    Write-Host 'DEBUG MODE ACTIVE - Firewall will not be updated.' -ForegroundColor Yellow
+    Write-Host "Rule Name: $ruleName"
+
+    if ($existingRule) {
+        Write-Host 'Existing Firewall Rule: Yes'
+    }
+    else {
+        Write-Host 'Existing Firewall Rule: No'
+    }
+
+    Write-Host "Number of IPs after whitelist filter: $($firewallIps.Count)"
+
+    if ($firewallIps.Count -gt 0) {
+        Write-Host 'The following IPs would be set in the firewall:'
+        $firewallIps | ForEach-Object { Write-Host "  $_" }
+    }
+    else {
+        Write-Host 'There are no IPs to block.'
+        if ($existingRule) {
+            Write-Host 'The existing firewall rule would be removed.'
+        }
+        else {
+            Write-Host 'There is no existing firewall rule, no action would be needed.'
+        }
+    }
+
+    return
+}
+
+if ($firewallIps.Count -gt 0) {
+    if ($existingRule) {
+        Set-NetFirewallRule -Name $ruleName -RemoteAddress $firewallIps
+    }
+    else {
+        New-NetFirewallRule `
+            -Name $ruleName `
+            -DisplayName $ruleDisplayName `
+            -Direction Inbound `
+            -Action Block `
+            -RemoteAddress $firewallIps
+    }
+}
+else {
+    if ($existingRule) {
+        Remove-NetFirewallRule -Name $ruleName
+    }
 }
